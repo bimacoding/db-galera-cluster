@@ -86,6 +86,50 @@ ansible-mysql-galera-cluster/
 
 ---
 
+## Script Persiapan Otomatis (`prepare-cluster.sh`)
+
+Tersedia script shell interaktif untuk mempermudah setup dari awal hingga deploy.
+
+**Lokasi:** `prepare-cluster.sh` (root folder proyek)
+
+### Yang Dilakukan Script
+
+| Step | Fungsi | Keterangan |
+|---|---|---|
+| 1 | **Deteksi OS** | Otomatis deteksi Ubuntu 20/22/24 & Debian 11/13 |
+| 2 | **Cek Internet** | Test koneksi ke mirror & server key |
+| 3 | **Update Sistem** | `apt update && apt upgrade` |
+| 4 | **Install Dependencies** | Python3, pip, Ansible, tools pendukung |
+| 5 | **Konfigurasi Firewall** | Buka port 3306, 4444, 4567, 4568 sesuai peran node |
+| 6 | **Setup SSH Key** | Generate ed25519 key jika belum ada |
+| 7 | **Copy SSH Key** | Copy public key ke semua server (via sshpass atau manual) |
+| 8 | **Pilih Playbook** | Pilih MariaDB 10.11 (rekomendasi) atau MySQL 5.7 |
+| 9 | **Input Server** | Masukkan IP, port, user untuk semua node |
+| 10 | **Test Koneksi** | Verifikasi SSH ke semua server |
+| 11 | **Generate Inventory** | Buat `inventory.yml` otomatis |
+| 12 | **Update Variabel** | Set cluster name & root password di playbook |
+| 13 | **Run Ansible** | Jalankan playbook (atau skip untuk manual nanti) |
+| - | **Simpan Kredensial** | File `.credentials-*.txt` (HAPUS setelah dipakai!) |
+
+### Cara Pakai
+
+```bash
+# Di mesin kontrol (laptop/PC tempat Ansible)
+chmod +x prepare-cluster.sh
+./prepare-cluster.sh
+```
+
+Script akan memandu Anda langkah demi langkah, dari install Ansible hingga deploy cluster.
+
+### Catatan Penting
+
+- Script ini dijalankan di **mesin kontrol** (bukan di server cluster)
+- Server tujuan harus sudah bisa diakses via SSH (minimal sudah install OpenSSH)
+- Password root akan di-generate otomatis jika dikosongkan
+- File kredensial disimpan dengan permission `600` — tetap **hapus setelah selesai**
+
+---
+
 ## Persyaratan Sistem
 
 ### Minimum Server
