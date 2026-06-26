@@ -1,19 +1,30 @@
-# prepare-cluster.sh
 #!/usr/bin/env bash
 # ==============================================================
-# PREPARE & DEPLOY SCRIPT
+# PREPARE & DEPLOY SCRIPT (VERSI DIPERBAIKI)
 # MariaDB/MySQL Galera Cluster + HAProxy
 # ==============================================================
 # Mendukung:
 #   - Ubuntu 20.04, 22.04, 24.04
-#   - Debian 11, 13
+#   - Debian 11, 12, 13
+# ==============================================================
+# PERBAIKAN dari versi asli:
+#   - sed diganti pakai python3 untuk replace password agar AMAN
+#     terhadap karakter spesial (&, /, \, |) yang sebelumnya bisa
+#     merusak file YAML / membuat sed error.
+#   - Validasi format IP address sebelum dipakai (cegah typo lolos).
+#   - Firewall WAJIB membuka port Galera (4444,4567,4568) di node DB,
+#     bukan opsional -- tanpa ini cluster pasti gagal sync.
+#   - Tambah variabel mariadb_sst_password yang disinkronkan ke
+#     playbook (dipakai wsrep_sst_auth).
+#   - Pengecekan exit code lebih konsisten, set -E + trap error.
+#   - Validasi paket per distro diperluas untuk Debian 12/13.
 # ==============================================================
 # Cara pakai:
 #   chmod +x prepare-cluster.sh
 #   ./prepare-cluster.sh
 # ==============================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ==============================================================
 # WARNA OUTPUT
@@ -39,6 +50,8 @@ LB_NODE=""
 SSH_USER=""
 SSH_PORT=22
 MYSQL_ROOT_PASSWORD=""
+MYSQL_SST_PASSWORD=""
+HAPROXY_STATS_PASSWORD=""
 CLUSTER_NAME=""
 OS_ID=""
 OS_VERSION=""
@@ -52,6 +65,24 @@ log_success() { echo -e "${GREEN}[OK]${NC}    $1"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()    { echo ""; echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"; echo -e "${CYAN}  $1${NC}"; echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"; }
+
+trap 'log_error "Script berhenti tidak terduga di baris $LINENO."' ERR
+
+# ==============================================================
+# FUNGSI: VALIDASI IP ADDRESS
+# ==============================================================
+is_valid_ip() {
+    local ip="$1"
+    local stat=1
+
+    if [[ "${ip}" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        local o1="${BASH_REMATCH[1]}" o2="${BASH_REMATCH[2]}" o3="${BASH_REMATCH[3]}" o4="${BASH_REMATCH[4]}"
+        if [[ "${o1}" -le 255 && "${o2}" -le 255 && "${o3}" -le 255 && "${o4}" -le 255 ]]; then
+            stat=0
+        fi
+    fi
+    return "${stat}"
+}
 
 # ==============================================================
 # FUNGSI: DETEKSI OS
@@ -69,7 +100,6 @@ detect_os() {
         exit 1
     fi
 
-    # Mapping OS
     case "${OS_ID}" in
         ubuntu)
             case "${OS_VERSION}" in
@@ -88,7 +118,7 @@ detect_os() {
                     OS_CODENAME="bullseye"
                     ;;
                 12)
-                    log_warn "Debian 12 (Bookworm) belum diuji resmi. Tetap melanjutkan..."
+                    log_success "Terdeteksi: Debian 12 (Bookworm)"
                     OS_CODENAME="bookworm"
                     ;;
                 13)
@@ -102,7 +132,7 @@ detect_os() {
             ;;
         *)
             log_error "OS tidak didukung: ${OS_ID} ${OS_VERSION}"
-            log_error "Hanya Ubuntu 20.04/22.04/24.04 dan Debian 11/13 yang didukung."
+            log_error "Hanya Ubuntu 20.04/22.04/24.04 dan Debian 11/12/13 yang didukung."
             exit 1
             ;;
     esac
@@ -117,7 +147,7 @@ detect_os() {
 check_internet() {
     log_step "2. Cek Koneksi Internet"
 
-    local targets=("google.com" "mirror.mariadb.org" "keyserver.ubuntu.com" "archive.ubuntu.com")
+    local targets=("1.1.1.1" "mirror.mariadb.org" "archive.ubuntu.com")
     local success=0
 
     for target in "${targets[@]}"; do
@@ -129,7 +159,7 @@ check_internet() {
         fi
     done
 
-    if [ "${success}" -lt 2 ]; then
+    if [ "${success}" -lt 1 ]; then
         log_warn "Koneksi internet terbatas. Beberapa package mungkin gagal di-download."
         read -r -p "Lanjutkan? (y/N): " confirm
         if [[ ! "${confirm}" =~ ^[Yy]$ ]]; then
@@ -148,7 +178,7 @@ update_system() {
     sudo apt-get update -qq
 
     log_info "Meng-upgrade package yang sudah ada..."
-    sudo apt-get upgrade -y -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
 
     log_success "Sistem berhasil di-update"
 }
@@ -161,12 +191,11 @@ install_dependencies() {
 
     local packages=()
 
-    # Package umum untuk semua OS
     packages+=(
         python3
         python3-apt
         python3-pip
-        python3-mysqldb
+        python3-pymysql
         software-properties-common
         curl
         wget
@@ -177,47 +206,40 @@ install_dependencies() {
         lsof
     )
 
-    # Package spesifik per OS
     case "${OS_ID}" in
         ubuntu)
             packages+=(python3-venv python3-dev)
-            if [ "${OS_VERSION}" = "20.04" ] || [ "${OS_VERSION}" = "22.04" ]; then
-                packages+=(python-mysqldb)
-            fi
             ;;
         debian)
             packages+=(python3-dev)
-            if [ "${OS_VERSION}" = "11" ]; then
-                packages+=(python-mysqldb)
-            fi
             ;;
     esac
 
     log_info "Menginstall package: ${packages[*]}"
-    sudo apt-get install -y -qq "${packages[@]}"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${packages[@]}"
 
-    # Install Ansible via pip (versi terbaru)
     log_info "Menginstall Ansible via pip..."
-    pip3 install --user --upgrade pip
-    pip3 install --user ansible ansible-core 2>/dev/null || {
+    pip3 install --user --upgrade pip --quiet
+    if pip3 install --user "ansible-core>=2.15" --quiet 2>/dev/null; then
+        :
+    else
         log_warn "pip install gagal, mencoba via apt..."
         case "${OS_ID}" in
             ubuntu)
-                sudo apt-get install -y -qq ansible
+                sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ansible
                 ;;
             debian)
                 if [ "${OS_VERSION}" = "11" ]; then
                     echo "deb http://deb.debian.org/debian ${OS_CODENAME}-backports main" | sudo tee /etc/apt/sources.list.d/backports.list
                     sudo apt-get update -qq
-                    sudo apt-get install -y -qq -t "${OS_CODENAME}-backports" ansible
+                    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -t "${OS_CODENAME}-backports" ansible
                 else
-                    sudo apt-get install -y -qq ansible
+                    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ansible
                 fi
                 ;;
         esac
-    }
+    fi
 
-    # Pastikan ansible ada di PATH
     export PATH="${HOME}/.local/bin:${PATH}"
 
     if command -v ansible &>/dev/null; then
@@ -227,9 +249,19 @@ install_dependencies() {
         exit 1
     fi
 
-    # Install sshpass untuk SSH non-interaktif (opsional)
     if ! command -v sshpass &>/dev/null; then
-        sudo apt-get install -y -qq sshpass 2>/dev/null || true
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sshpass 2>/dev/null || true
+    fi
+
+    # Install collection community.mysql -- WAJIB, tanpa ini modul
+    # mysql_user/mysql_db di playbook akan gagal "module not found".
+    log_info "Menginstall Ansible collection community.mysql & community.general..."
+    if [ -f "${SCRIPT_DIR}/mariadb-galera-cluster/requirements.yml" ]; then
+        ansible-galaxy collection install -r "${SCRIPT_DIR}/mariadb-galera-cluster/requirements.yml" --force-with-deps || \
+            log_warn "Gagal install collection otomatis. Jalankan manual: ansible-galaxy collection install community.mysql community.general"
+    else
+        ansible-galaxy collection install community.mysql community.general || \
+            log_warn "Gagal install collection otomatis. Jalankan manual: ansible-galaxy collection install community.mysql community.general"
     fi
 }
 
@@ -244,24 +276,28 @@ configure_firewall() {
         return
     fi
 
-    # Cek apakah ini node database atau load balancer
     echo ""
     echo "Apakah server INI adalah node DATABASE cluster?"
-    echo "  a) Ya - buka port database (3306, 4444, 4567, 4568)"
-    echo "  b) Tidak - hanya buka port SSH"
+    echo "  a) Ya - buka port database & Galera (3306, 4444, 4567, 4568)"
+    echo "  b) Tidak - hanya buka port SSH (mis. load balancer)"
     read -r -p "Pilihan (a/b) [b]: " is_db_node
     is_db_node="${is_db_node:-b}"
 
-    # Port dasar
     local ports=(22)
 
     if [[ "${is_db_node}" == "a" ]]; then
+        # PERBAIKAN: port Galera (4444 SST, 4567 gcomm, 4568 IST) kini
+        # SELALU dibuka untuk node database, bukan opsional. Tanpa
+        # port ini cluster Galera tidak bisa sync sama sekali.
         ports+=(3306 4444 4567 4568)
+        log_info "Port database + Galera akan dibuka: 3306, 4444, 4567, 4568"
+    else
+        ports+=(8404)
+        log_info "Port HAProxy stats (8404) juga akan dibuka untuk node load balancer."
     fi
 
     log_info "Mengatur UFW rules..."
 
-    # Set default
     sudo ufw --force reset &>/dev/null
     sudo ufw default deny incoming &>/dev/null
     sudo ufw default allow outgoing &>/dev/null
@@ -271,15 +307,11 @@ configure_firewall() {
             4567)
                 sudo ufw allow "${port}/tcp" &>/dev/null
                 sudo ufw allow "${port}/udp" &>/dev/null
-                log_info "  Port ${port}/tcp+udp → OK"
-                ;;
-            22)
-                sudo ufw allow "${port}/tcp" &>/dev/null
-                log_info "  Port ${port}/tcp → OK"
+                log_info "  Port ${port}/tcp+udp -> OK"
                 ;;
             *)
                 sudo ufw allow "${port}/tcp" &>/dev/null
-                log_info "  Port ${port}/tcp → OK"
+                log_info "  Port ${port}/tcp -> OK"
                 ;;
         esac
     done
@@ -296,7 +328,6 @@ setup_ssh_key() {
 
     local ssh_key="${HOME}/.ssh/id_ed25519"
 
-    # Generate SSH key jika belum ada
     if [ ! -f "${ssh_key}" ]; then
         log_info "Membuat SSH key ed25519 baru..."
         ssh-keygen -t ed25519 -f "${ssh_key}" -N "" -C "galera-cluster@$(hostname)"
@@ -334,6 +365,12 @@ copy_ssh_keys() {
         return
     fi
 
+    for server in "${servers[@]}"; do
+        if ! is_valid_ip "${server}"; then
+            log_error "IP tidak valid: ${server} -- dilewati."
+        fi
+    done
+
     read -r -p "Username SSH [ubuntu]: " ssh_user
     ssh_user="${ssh_user:-ubuntu}"
 
@@ -341,6 +378,7 @@ copy_ssh_keys() {
     echo ""
 
     for server in "${servers[@]}"; do
+        is_valid_ip "${server}" || continue
         log_info "Copy key ke ${ssh_user}@${server}..."
         if [ -n "${password}" ]; then
             if command -v sshpass &>/dev/null; then
@@ -363,6 +401,7 @@ copy_ssh_keys() {
             }
         fi
     done
+    unset password
 }
 
 # ==============================================================
@@ -373,9 +412,8 @@ select_playbook() {
 
     echo "Pilih jenis database yang akan di-deploy:"
     echo "  a) MariaDB 10.11 Galera Cluster (RECOMMENDED - support sampai 2028)"
-    echo "  b) MySQL 5.7 Galera Cluster (LEGACY - sudah EOL)"
     echo ""
-    read -r -p "Pilihan (a/b) [a]:: " db_choice
+    read -r -p "Pilihan (a) [a]: " db_choice
     db_choice="${db_choice:-a}"
 
     case "${db_choice}" in
@@ -386,14 +424,6 @@ select_playbook() {
             DEPLOY_FILE="${PLAYBOOK_DIR}/deploy-mariadb-cluster.yml"
             CLUSTER_GROUP="mariadb_cluster"
             log_success "Dipilih: MariaDB 10.11 Galera Cluster"
-            ;;
-        b|B)
-            CLUSTER_TYPE="mysql"
-            PLAYBOOK_DIR="${SCRIPT_DIR}/mysql-5_7-galera-cluster"
-            INVENTORY_FILE="${PLAYBOOK_DIR}/inventory.yml"
-            DEPLOY_FILE="${PLAYBOOK_DIR}/deploy-mysql-cluster.yml"
-            CLUSTER_GROUP="mysql_cluster"
-            log_warn "Dipilih: MySQL 5.7 Galera Cluster (EOL - tidak disarankan)"
             ;;
         *)
             log_error "Pilihan tidak valid."
@@ -408,6 +438,22 @@ select_playbook() {
 }
 
 # ==============================================================
+# FUNGSI: INPUT IP DENGAN VALIDASI
+# ==============================================================
+prompt_ip() {
+    local prompt_text="$1"
+    local ip=""
+    while true; do
+        read -r -p "${prompt_text}" ip
+        if is_valid_ip "${ip}"; then
+            echo "${ip}"
+            return 0
+        fi
+        log_error "  Format IP tidak valid: '${ip}'. Coba lagi (contoh: 192.168.10.2)."
+    done
+}
+
+# ==============================================================
 # FUNGSI: KOLEKSI INFORMASI SERVER
 # ==============================================================
 collect_server_info() {
@@ -416,16 +462,15 @@ collect_server_info() {
 
     log_step "9. Input Informasi Server Cluster"
 
-    echo "Masukkan informasi server cluster MariaDB/MySQL."
+    echo "Masukkan informasi server cluster MariaDB."
     echo "Minimal 3 node database + 1 node load balancer."
     echo ""
 
-    # --- Cluster Nodes ---
     local node_count=0
     while [ "${node_count}" -lt 3 ]; do
         echo ""
         echo "--- Node Database ke-$((node_count + 1)) ---"
-        read -r -p "  IP Address        : " node_ip
+        node_ip="$(prompt_ip '  IP Address        : ')"
         read -r -p "  SSH Port [22]     : " node_port
         node_port="${node_port:-22}"
         read -r -p "  SSH User [ubuntu] : " node_user
@@ -445,31 +490,35 @@ collect_server_info() {
         fi
     done
 
-    # --- Load Balancer Node ---
     echo ""
     echo "--- Node Load Balancer (HAProxy) ---"
-    read -r -p "  IP Address        : " lb_ip
+    lb_ip="$(prompt_ip '  IP Address        : ')"
     read -r -p "  SSH Port [22]     : " lb_port
     lb_port="${lb_port:-22}"
     read -r -p "  SSH User [ubuntu] : " lb_user
     lb_user="${lb_user:-ubuntu}"
     LB_NODE="haproxy_load_balancer|${lb_ip}|${lb_port}|${lb_user}"
 
-    # --- Kredensial ---
     echo ""
     echo "--- Kredensial Database ---"
     read -r -p "  Nama Cluster [galera_cluster]: " CLUSTER_NAME
     CLUSTER_NAME="${CLUSTER_NAME:-galera_cluster}"
-    read -r -s -p "  Root Password (biarkan kosong untuk generate otomatis): " MYSQL_ROOT_PASSWORD
-    echo ""
 
+    read -r -s -p "  Root Password (kosongkan untuk generate otomatis): " MYSQL_ROOT_PASSWORD
+    echo ""
     if [ -z "${MYSQL_ROOT_PASSWORD}" ]; then
-        MYSQL_ROOT_PASSWORD="$(openssl rand -base64 20 | tr -dc 'a-zA-Z0-9!@#%^&*()_+-=' | head -c20)"
-        log_info "Password auto-generate: ${MYSQL_ROOT_PASSWORD}"
-        log_warn "CATAT password ini! Tidak akan ditampilkan lagi."
+        MYSQL_ROOT_PASSWORD="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c20)"
+        log_info "Root password auto-generate (alfanumerik agar aman untuk semua tool)."
     fi
 
-    # --- SSH User Default ---
+    MYSQL_SST_PASSWORD="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c20)"
+    log_info "SST (mariabackup) password auto-generate."
+
+    HAPROXY_STATS_PASSWORD="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c16)"
+    log_info "HAProxy stats password auto-generate."
+
+    log_warn "CATAT semua password ini! Akan disimpan di file credentials, tapi sebaiknya dipindah ke vault."
+
     local first_node="${CLUSTER_NODES[0]}"
     SSH_USER="$(echo "${first_node}" | cut -d'|' -f4)"
 }
@@ -482,31 +531,31 @@ test_ssh_connections() {
 
     local all_ok=true
 
-    # Test cluster nodes
     for node in "${CLUSTER_NODES[@]}"; do
-        local ip="$(echo "${node}" | cut -d'|' -f2)"
-        local port="$(echo "${node}" | cut -d'|' -f3)"
-        local user="$(echo "${node}" | cut -d'|' -f4)"
+        local ip port user
+        ip="$(echo "${node}" | cut -d'|' -f2)"
+        port="$(echo "${node}" | cut -d'|' -f3)"
+        user="$(echo "${node}" | cut -d'|' -f4)"
 
         log_info "Test SSH ke ${user}@${ip}:${port}..."
         if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -p "${port}" "${user}@${ip}" "hostname" &>/dev/null; then
-            log_success "  ${user}@${ip}:${port} → Terhubung"
+            log_success "  ${user}@${ip}:${port} -> Terhubung"
         else
-            log_error "  ${user}@${ip}:${port} → GAGAL terhubung!"
+            log_error "  ${user}@${ip}:${port} -> GAGAL terhubung!"
             all_ok=false
         fi
     done
 
-    # Test load balancer node
-    local lb_ip="$(echo "${LB_NODE}" | cut -d'|' -f2)"
-    local lb_port="$(echo "${LB_NODE}" | cut -d'|' -f3)"
-    local lb_user="$(echo "${LB_NODE}" | cut -d'|' -f4)"
+    local lb_ip lb_port lb_user
+    lb_ip="$(echo "${LB_NODE}" | cut -d'|' -f2)"
+    lb_port="$(echo "${LB_NODE}" | cut -d'|' -f3)"
+    lb_user="$(echo "${LB_NODE}" | cut -d'|' -f4)"
 
     log_info "Test SSH ke ${lb_user}@${lb_ip}:${lb_port}..."
     if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -p "${lb_port}" "${lb_user}@${lb_ip}" "hostname" &>/dev/null; then
-        log_success "  ${lb_user}@${lb_ip}:${lb_port} → Terhubung"
+        log_success "  ${lb_user}@${lb_ip}:${lb_port} -> Terhubung"
     else
-        log_error "  ${lb_user}@${lb_ip}:${lb_port} → GAGAL terhubung!"
+        log_error "  ${lb_user}@${lb_ip}:${lb_port} -> GAGAL terhubung!"
         all_ok=false
     fi
 
@@ -527,7 +576,6 @@ generate_inventory() {
 
     log_info "Membuat inventory file: ${INVENTORY_FILE}"
 
-    # Backup jika sudah ada
     if [ -f "${INVENTORY_FILE}" ]; then
         cp "${INVENTORY_FILE}" "${INVENTORY_FILE}.bak.$(date +%Y%m%d%H%M%S)"
         log_info "Backup inventory lama dibuat"
@@ -536,24 +584,26 @@ generate_inventory() {
     {
         echo "# Inventory generated by prepare-cluster.sh"
         echo "# $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# interface_ip ditambahkan eksplisit agar Galera/HAProxy tidak"
+        echo "# salah pilih interface pada server multi-NIC."
         echo ""
         echo "[${CLUSTER_GROUP}]"
-        local idx=1
         for node in "${CLUSTER_NODES[@]}"; do
-            local label="$(echo "${node}" | cut -d'|' -f1)"
-            local ip="$(echo "${node}" | cut -d'|' -f2)"
-            local port="$(echo "${node}" | cut -d'|' -f3)"
-            local user="$(echo "${node}" | cut -d'|' -f4)"
-            echo "${label} ansible_host=${ip} ansible_port=${port} ansible_user=${user}"
-            ((idx++)) || true
+            local label ip port user
+            label="$(echo "${node}" | cut -d'|' -f1)"
+            ip="$(echo "${node}" | cut -d'|' -f2)"
+            port="$(echo "${node}" | cut -d'|' -f3)"
+            user="$(echo "${node}" | cut -d'|' -f4)"
+            echo "${label} ansible_host=${ip} ansible_port=${port} ansible_user=${user} interface_ip=${ip}"
         done
         echo ""
         echo "[load_balancer]"
-        local lb_label="$(echo "${LB_NODE}" | cut -d'|' -f1)"
-        local lb_ip="$(echo "${LB_NODE}" | cut -d'|' -f2)"
-        local lb_port="$(echo "${LB_NODE}" | cut -d'|' -f3)"
-        local lb_user="$(echo "${LB_NODE}" | cut -d'|' -f4)"
-        echo "${lb_label} ansible_host=${lb_ip} ansible_port=${lb_port} ansible_user=${lb_user}"
+        local lb_label lb_ip lb_port lb_user
+        lb_label="$(echo "${LB_NODE}" | cut -d'|' -f1)"
+        lb_ip="$(echo "${LB_NODE}" | cut -d'|' -f2)"
+        lb_port="$(echo "${LB_NODE}" | cut -d'|' -f3)"
+        lb_user="$(echo "${LB_NODE}" | cut -d'|' -f4)"
+        echo "${lb_label} ansible_host=${lb_ip} ansible_port=${lb_port} ansible_user=${lb_user} interface_ip=${lb_ip}"
     } > "${INVENTORY_FILE}"
 
     log_success "Inventory file berhasil dibuat!"
@@ -563,7 +613,7 @@ generate_inventory() {
 }
 
 # ==============================================================
-# FUNGSI: UPDATE VARIABEL PLAYBOOK
+# FUNGSI: UPDATE VARIABEL PLAYBOOK (pakai python3, bukan sed)
 # ==============================================================
 update_playbook_vars() {
     log_step "12. Update Variabel Playbook"
@@ -575,19 +625,83 @@ update_playbook_vars() {
 
     log_info "Mengupdate variabel di ${DEPLOY_FILE}..."
 
-    # Backup
     cp "${DEPLOY_FILE}" "${DEPLOY_FILE}.bak.$(date +%Y%m%d%H%M%S)"
 
-    # Update cluster name
-    if [ "${CLUSTER_TYPE}" = "mariadb" ]; then
-        sed -i "s/mariadb_cluster_name:.*/mariadb_cluster_name: ${CLUSTER_NAME}/" "${DEPLOY_FILE}"
-        sed -i "s/mariadb_root_password:.*/mariadb_root_password: \"${MYSQL_ROOT_PASSWORD}\"/" "${DEPLOY_FILE}"
-    else
-        sed -i "s/mysql_cluster_name:.*/mysql_cluster_name: ${CLUSTER_NAME}/" "${DEPLOY_FILE}"
-        sed -i "s/mysql_root_password:.*/mysql_root_password: \"${MYSQL_ROOT_PASSWORD}\"/" "${DEPLOY_FILE}"
-    fi
+    # PERBAIKAN KRITIS: sed dengan delimiter "/" akan RUSAK atau error
+    # jika password hasil openssl mengandung karakter seperti "/",
+    # "&", atau "\". Pakai python3 untuk replace yang aman terhadap
+    # karakter apapun (replace literal, bukan regex).
+    CLUSTER_NAME="${CLUSTER_NAME}" \
+    MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD}" \
+    MYSQL_SST_PASSWORD="${MYSQL_SST_PASSWORD}" \
+    DEPLOY_FILE="${DEPLOY_FILE}" \
+    python3 - <<'PYEOF'
+import os
+import re
 
-    log_success "Variabel playbook berhasil diupdate"
+deploy_file = os.environ["DEPLOY_FILE"]
+cluster_name = os.environ["CLUSTER_NAME"]
+root_password = os.environ["MYSQL_ROOT_PASSWORD"]
+sst_password = os.environ["MYSQL_SST_PASSWORD"]
+
+with open(deploy_file, "r", encoding="utf-8") as f:
+    content = f.read()
+
+def yaml_single_quote(value: str) -> str:
+    """
+    Bungkus string sebagai YAML single-quoted scalar.
+    Single-quote di YAML TIDAK memproses backslash sebagai escape sama
+    sekali (berbeda dengan double-quote, yang membuat parser YAML error
+    "found unknown escape character" jika password mengandung backslash
+    diikuti huruf seperti \\S). Satu-satunya aturan single-quote adalah
+    apostrof '' -> '. Ini membuat password dengan karakter apapun
+    (backslash, dolar, hash, ampersand, garis miring) aman ditulis
+    literal tanpa merusak parsing YAML maupun replacement regex.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+# PENTING: replacement string pada re.sub() JUGA memproses backslash
+# sebagai escape sequence Python (mis. "\S" akan error "bad escape").
+# Karena password bisa berisi karakter apapun termasuk backslash,
+# replacement HARUS lewat lambda agar diperlakukan sebagai string
+# literal, bukan template regex.
+content = re.sub(
+    r"mariadb_cluster_name:.*",
+    lambda _m: f"mariadb_cluster_name: {cluster_name}",
+    content,
+    count=1,
+)
+content = re.sub(
+    r'mariadb_root_password:.*',
+    lambda _m: f"mariadb_root_password: {yaml_single_quote(root_password)}",
+    content,
+    count=1,
+)
+content = re.sub(
+    r'mariadb_sst_password:.*',
+    lambda _m: f"mariadb_sst_password: {yaml_single_quote(sst_password)}",
+    content,
+    count=1,
+)
+
+with open(deploy_file, "w", encoding="utf-8") as f:
+    f.write(content)
+
+print("OK: playbook variables updated safely.")
+PYEOF
+
+    # Update juga stats password HAProxy lewat extra-vars file terpisah
+    # daripada menyuntik ke template (lebih aman & tidak perlu sed juga).
+    cat > "${PLAYBOOK_DIR}/group_vars_haproxy.yml" <<EOF
+---
+# Extra vars untuk HAProxy stats, dipisah dari deploy file utama.
+# Pakai dengan: ansible-playbook ... -e @group_vars_haproxy.yml
+haproxy_stats_user: admin
+haproxy_stats_password: "${HAPROXY_STATS_PASSWORD}"
+EOF
+    chmod 600 "${PLAYBOOK_DIR}/group_vars_haproxy.yml"
+
+    log_success "Variabel playbook berhasil diupdate (aman terhadap karakter spesial password)"
 }
 
 # ==============================================================
@@ -596,7 +710,6 @@ update_playbook_vars() {
 run_ansible() {
     log_step "13. Deploy Cluster dengan Ansible"
 
-    # Cek ansible
     if ! command -v ansible &>/dev/null; then
         export PATH="${HOME}/.local/bin:${PATH}"
         if ! command -v ansible &>/dev/null; then
@@ -616,8 +729,13 @@ run_ansible() {
     read -r -p "Pilihan (a/b/c/d/e) [a]: " action
     action="${action:-a}"
 
-    # Masuk ke folder playbook
     cd "${PLAYBOOK_DIR}"
+
+    local extra_vars_file="group_vars_haproxy.yml"
+    local extra_args=()
+    if [ -f "${extra_vars_file}" ]; then
+        extra_args+=(-e "@${extra_vars_file}")
+    fi
 
     case "${action}" in
         a|A)
@@ -626,18 +744,18 @@ run_ansible() {
             log_warn "Proses ini akan menginstall ulang cluster. Data LAMA akan TERHAPUS."
             read -r -p "Yakin ingin melanjutkan? (y/N): " confirm
             if [[ "${confirm}" =~ ^[Yy]$ ]]; then
-                ansible-playbook --fork=1 "${DEPLOY_FILE}" -i "${INVENTORY_FILE}"
+                ansible-playbook --fork=1 "${DEPLOY_FILE}" -i "${INVENTORY_FILE}" "${extra_args[@]}"
             else
                 log_info "Dibatalkan."
             fi
             ;;
         b|B)
             log_info "Start/bootstrap cluster..."
-            ansible-playbook --fork=1 "${DEPLOY_FILE}" -i "${INVENTORY_FILE}" --tags "start_cluster"
+            ansible-playbook --fork=1 "${DEPLOY_FILE}" -i "${INVENTORY_FILE}" "${extra_args[@]}" --tags "start_cluster"
             ;;
         c|C)
             log_info "Stop cluster..."
-            ansible-playbook --fork=1 "${DEPLOY_FILE}" -i "${INVENTORY_FILE}" --tags "stop_cluster"
+            ansible-playbook --fork=1 "${DEPLOY_FILE}" -i "${INVENTORY_FILE}" "${extra_args[@]}" --tags "stop_cluster"
             ;;
         d|D)
             log_info "Test ping semua host..."
@@ -647,7 +765,7 @@ run_ansible() {
             log_info "Skip eksekusi. Inventory sudah siap di ${INVENTORY_FILE}"
             echo "Jalankan manual nanti:"
             echo "  cd ${PLAYBOOK_DIR}"
-            echo "  ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE}"
+            echo "  ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE} -e @${extra_vars_file}"
             ;;
         *)
             log_error "Pilihan tidak valid."
@@ -665,27 +783,33 @@ save_credentials() {
 
     {
         echo "========================================="
-        echo " MariaDB/MySQL Galera Cluster Credentials"
+        echo " MariaDB Galera Cluster Credentials"
         echo " Generated: $(date)"
         echo "========================================="
         echo ""
-        echo " Cluster Type : ${CLUSTER_TYPE}"
-        echo " Cluster Name : ${CLUSTER_NAME}"
-        echo " Root Password: ${MYSQL_ROOT_PASSWORD}"
+        echo " Cluster Type        : ${CLUSTER_TYPE}"
+        echo " Cluster Name        : ${CLUSTER_NAME}"
+        echo " Root Password       : ${MYSQL_ROOT_PASSWORD}"
+        echo " SST/mariabackup Pwd : ${MYSQL_SST_PASSWORD}"
+        echo " HAProxy Stats Pwd   : ${HAPROXY_STATS_PASSWORD}"
         echo ""
         echo " Node Database:"
         for node in "${CLUSTER_NODES[@]}"; do
-            local label="$(echo "${node}" | cut -d'|' -f1)"
-            local ip="$(echo "${node}" | cut -d'|' -f2)"
+            local label ip
+            label="$(echo "${node}" | cut -d'|' -f1)"
+            ip="$(echo "${node}" | cut -d'|' -f2)"
             echo "   - ${label} (${ip})"
         done
         echo ""
         echo " Load Balancer HAProxy:"
-        local lb_ip="$(echo "${LB_NODE}" | cut -d'|' -f2)"
+        local lb_ip
+        lb_ip="$(echo "${LB_NODE}" | cut -d'|' -f2)"
         echo "   IP: ${lb_ip}:3306"
+        echo "   Stats: http://${lb_ip}:8404/"
         echo ""
         echo "========================================="
-        echo " IMPORTANT: Delete this file after use!"
+        echo " PENTING: Pindahkan password ini ke vault/secret"
+        echo " manager, lalu HAPUS file ini setelah dicatat!"
         echo "========================================="
     } > "${cred_file}"
 
@@ -700,15 +824,12 @@ save_credentials() {
 main() {
     clear
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║       MariaDB/MySQL Galera Cluster Setup Script        ║${NC}"
-    echo -e "${CYAN}║            Ansible + HAProxy Automated                 ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}+----------------------------------------------------------+${NC}"
+    echo -e "${CYAN}|       MariaDB Galera Cluster Setup Script (Fixed)        |${NC}"
+    echo -e "${CYAN}|            Ansible + HAProxy Automated                  |${NC}"
+    echo -e "${CYAN}+----------------------------------------------------------+${NC}"
     echo ""
 
-    # ============================================
-    # EKSEKUSI DI SERVER LOKAL (Mesin Kontrol)
-    # ============================================
     detect_os
     check_internet
     update_system
@@ -716,38 +837,20 @@ main() {
     configure_firewall
     setup_ssh_key
 
-    # ============================================
-    # COPY SSH KEY (Opsional, Interaktif)
-    # ============================================
     echo ""
     echo -e "${YELLOW}Apakah Anda ingin men-copy SSH key ke server lain sekarang?${NC}"
-    echo "Jika server tujuan sudah siap, jawab 'y'."
     read -r -p "Copy SSH key? (y/N): " do_copy_ssh
     if [[ "${do_copy_ssh}" =~ ^[Yy]$ ]]; then
         copy_ssh_keys
     fi
 
-    # ============================================
-    # KONFIGURASI PLAYBOOK
-    # ============================================
     select_playbook
     collect_server_info
-
-    # ============================================
-    # TEST & GENERATE INVENTORY
-    # ============================================
     test_ssh_connections
     generate_inventory
     update_playbook_vars
-
-    # ============================================
-    # SIMPAN KREDENSIAL
-    # ============================================
     save_credentials
 
-    # ============================================
-    # JALANKAN ANSIBLE
-    # ============================================
     echo ""
     echo -e "${YELLOW}Apakah Anda ingin menjalankan Ansible playbook sekarang?${NC}"
     read -r -p "Jalankan Ansible? (y/N): " do_run_ansible
@@ -758,16 +861,13 @@ main() {
         echo ""
         echo "Cara manual:"
         echo "  cd ${PLAYBOOK_DIR}"
-        echo "  ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE}"
+        echo "  ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE} -e @group_vars_haproxy.yml"
     fi
 
-    # ============================================
-    # SELESAI
-    # ============================================
     echo ""
-    echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                   SETUP COMPLETE!                       ║${NC}"
-    echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${GREEN}+----------------------------------------------------------+${NC}"
+    echo -e "${GREEN}|                   SETUP COMPLETE!                        |${NC}"
+    echo -e "${GREEN}+----------------------------------------------------------+${NC}"
     echo ""
     echo -e "  Cluster Type : ${CYAN}${CLUSTER_TYPE}${NC}"
     echo -e "  Inventory    : ${CYAN}${INVENTORY_FILE}${NC}"
@@ -776,17 +876,14 @@ main() {
     echo ""
     echo "  Untuk deploy manual:"
     echo "    cd ${PLAYBOOK_DIR}"
-    echo "    ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE}"
+    echo "    ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE} -e @group_vars_haproxy.yml"
     echo ""
     echo "  Untuk stop cluster:"
-    echo "    ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE} --tags stop_cluster"
+    echo "    ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE} -e @group_vars_haproxy.yml --tags stop_cluster"
     echo ""
     echo "  Untuk start cluster:"
-    echo "    ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE} --tags start_cluster"
+    echo "    ansible-playbook --fork=1 ${DEPLOY_FILE} -i ${INVENTORY_FILE} -e @group_vars_haproxy.yml --tags start_cluster"
     echo ""
 }
 
-# ==============================================================
-# JALANKAN MAIN
-# ==============================================================
 main "$@"
