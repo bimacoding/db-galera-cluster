@@ -186,19 +186,125 @@ mariadb-galera-cluster-fix/
 
 Ada dua cara untuk memulai. Pilih salah satu:
 
-### 4.1 Setup SSH Key (Menggunakan `setup-ssh.sh`)
+### 4.1 Konsep Penting: Di Mana Semua Script Dijalankan?
 
-**Cara ini disarankan** jika Anda belum punya SSH key yang terpasang di semua server.
+Sebelum melangkah lebih jauh, Anda harus paham **di mana setiap perintah dijalankan**.
+
+```mermaid
+graph TB
+    subgraph ADMIN["MESIN ADMINISTRATOR / ANSIBLE CONTROLLER"]
+        A1["💻 Laptop / PC / Server Anda Sendiri<br/>(BUKAN node database / HAProxy)"]
+        A2["Tempat menjalankan SEMUA script:"]
+        A3["├── setup-ssh.sh"]
+        A4["├── prepare-cluster.sh"]
+        A5["├── ansible-playbook ..."]
+        A6["└── ansible ... -m ping"]
+    end
+
+    subgraph TARGETS["SERVER TUJUAN (Target Servers) — TIDAK perlu menjalankan script apa pun"]
+        N1["🖥️ Node 1 Database<br/>192.168.10.2<br/>Hanya perlu SSH + sudo"]
+        N2["🖥️ Node 2 Database<br/>192.168.10.3<br/>Hanya perlu SSH + sudo"]
+        N3["🖥️ Node 3 Database<br/>192.168.10.4<br/>Hanya perlu SSH + sudo"]
+        L1["🖥️ HAProxy Load Balancer<br/>192.168.10.5<br/>Hanya perlu SSH + sudo"]
+    end
+
+    ADMIN ==>|"SSH (port 22)"| N1
+    ADMIN ==>|"SSH (port 22)"| N2
+    ADMIN ==>|"SSH (port 22)"| N3
+    ADMIN ==>|"SSH (port 22)"| L1
+
+    style ADMIN fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style A1 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style A2 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style A3 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style A4 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style A5 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style A6 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style TARGETS fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style N1 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style N2 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style N3 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+    style L1 fill:#1e3a8a,stroke:#ffffff,stroke-width:2px,color:#ffffff
+```
+
+**Aturan Emas (Golden Rule):**
+
+| Script / Perintah | Dijalankan di Mana? | Target |
+|-------------------|---------------------|--------|
+| `setup-ssh.sh` | **Mesin Administrator** (satu mesin) | Mengirim SSH key KE semua server tujuan |
+| `prepare-cluster.sh` | **Mesin Administrator** (satu mesin) | Menginstall Ansible LOKAL, lalu konfigurasi SEMUA server via SSH |
+| `ansible-playbook ...` | **Mesin Administrator** (satu mesin) | Mengeksekusi task di SEMUA server tujuan via SSH |
+| `ansible all -m ping` | **Mesin Administrator** (satu mesin) | Test koneksi ke SEMUA server tujuan |
+| Firewall UFW | **SETIAP server** (via SSH atau langsung) | Konfigurasi firewall di masing-masing server |
+
+> **💡 Analogi:** Mesin Administrator adalah seperti **pusat komando**. Dari satu mesin ini, Anda mengatur 4 server lain (3 DB + 1 HAProxy) tanpa harus login ke masing-masing server satu per satu. Ansible akan melakukan semuanya secara otomatis lewat SSH.
+
+**Apa yang terjadi di setiap server target:**
+- **Node 1, 2, 3 (Database):** Tidak perlu menjalankan script apa pun. Ansible dari mesin administrator akan otomatis: install MariaDB, konfigurasi Galera, set password, dsb.
+- **HAProxy (Load Balancer):** Tidak perlu menjalankan script apa pun. Ansible akan otomatis: install HAProxy, deploy konfigurasi, restart service.
+- **Node baru (jika ditambahkan nanti):** Sama seperti di atas — cukup SSH akses, Ansible akan urus sisanya.
+
+---
+
+### 4.2 Setup SSH Key (Menggunakan `setup-ssh.sh`)
+
+**Cara ini disarankan** jika Anda belum punya SSH key yang terpasang di semua server tujuan.
+
+**PENTING:** Script ini dijalankan di **satu mesin Administrator** saja (laptop/PC/server manajemen Anda). BUKAN di Node 1, Node 2, Node 3, atau HAProxy.
 
 ```bash
-# 1. Masuk ke direktori
+# 1. Masuk ke direktori proyek DI MESIN ADMINISTRATOR
 cd /path/to/mariadb-galera-cluster-fix
 
 # 2. Beri izin eksekusi
 chmod +x setup-ssh.sh prepare-cluster.sh
 
-# 3. Jalankan setup SSH
+# 3. Jalankan setup SSH (DI MESIN ADMINISTRATOR, bukan di server tujuan!)
 ./setup-ssh.sh
+```
+
+**Apa yang terjadi saat `setup-ssh.sh` dijalankan:**
+
+```mermaid
+sequenceDiagram
+    participant Admin as Mesin Administrator
+    participant Script as setup-ssh.sh
+    participant Node1 as Node 1 DB (192.168.10.2)
+    participant Node2 as Node 2 DB (192.168.10.3)
+    participant Node3 as Node 3 DB (192.168.10.4)
+    participant LB as HAProxy (192.168.10.5)
+    participant User as Anda (Input)
+
+    Note over Admin,LB: SEMUA script dijalankan dari SATU mesin (Administrator)
+
+    Admin->>Script: ./setup-ssh.sh
+    Script->>Admin: Step 1: Install openssh-client + sshpass (jika perlu)
+    Script->>Admin: Step 2: Generate SSH key (id_ed25519) di ~/.ssh/
+
+    User->>Script: Step 3: Input IP server tujuan
+    Script->>Admin: Step 4: Copy SSH key ke SEMUA server
+
+    Script->>Node1: ssh-copy-id ubuntu@192.168.10.2
+    Node1-->>Script: ✅ Key tersimpan
+    Script->>Node2: ssh-copy-id ubuntu@192.168.10.3
+    Node2-->>Script: ✅ Key tersimpan
+    Script->>Node3: ssh-copy-id ubuntu@192.168.10.4
+    Node3-->>Script: ✅ Key tersimpan
+    Script->>LB: ssh-copy-id ubuntu@192.168.10.5
+    LB-->>Script: ✅ Key tersimpan
+
+    Script->>Admin: Step 5: Test koneksi passwordless
+    Script->>Node1: ssh ubuntu@192.168.10.2 hostname
+    Node1-->>Admin: "node1" (tanpa minta password)
+    Script->>Node2: ssh ubuntu@192.168.10.3 hostname
+    Node2-->>Admin: "node2" (tanpa minta password)
+    Script->>Node3: ssh ubuntu@192.168.10.4 hostname
+    Node3-->>Admin: "node3" (tanpa minta password)
+    Script->>LB: ssh ubuntu@192.168.10.5 hostname
+    LB-->>Admin: "haproxy" (tanpa minta password)
+
+    Note over Admin,LB: ✅ Selesai - semua server bisa diakses passwordless
+    Note over Admin,LB: Selanjutnya: ./prepare-cluster.sh (MASIH di Mesin Administrator)
 ```
 
 **Alur interaktif `setup-ssh.sh`:**
@@ -212,7 +318,7 @@ chmod +x setup-ssh.sh prepare-cluster.sh
          → Tampilkan public key
 
  Step 3: Pilih Cara Input Server
-   a) Input manual satu per satu (interaktif)
+   a) Input manual satu per satu (interaktif) — ketik IP server tujuan
    b) Baca dari file daftar (format: ip,port,user per baris)
 
  Step 4: Copy SSH Key ke Semua Server
@@ -226,15 +332,15 @@ chmod +x setup-ssh.sh prepare-cluster.sh
          → Tampilkan ringkasan: IP + STATUS (OK/FAILED)
 ```
 
-**Contoh input manual:**
+**Contoh input manual (ketik IP server TARGET — bukan IP mesin Administrator):**
 ```
 Server ke-1:
-  IP Address        : 192.168.10.2
+  IP Address        : 192.168.10.2    ← IP Node 1 Database
   SSH Port [22]     : 22
   SSH User [ubuntu] : ubuntu
 
 Server ke-2:
-  IP Address        : 192.168.10.3
+  IP Address        : 192.168.10.3    ← IP Node 2 Database
   ...
 
 Ketik 'selesai' untuk berhenti.
@@ -242,27 +348,29 @@ Ketik 'selesai' untuk berhenti.
 
 **Contoh file daftar server** (simpan sebagai `servers.txt`):
 ```text
-192.168.10.2,22,ubuntu
-192.168.10.3,22,ubuntu
-192.168.10.4,22,ubuntu
-192.168.10.5,22,ubuntu
+192.168.10.2,22,ubuntu    ← Node 1 Database
+192.168.10.3,22,ubuntu    ← Node 2 Database
+192.168.10.4,22,ubuntu    ← Node 3 Database
+192.168.10.5,22,ubuntu    ← HAProxy Load Balancer
 ```
 
-### 4.2 Persiapan Manual (Tanpa `setup-ssh.sh`)
+---
 
-Jika SSH key sudah siap atau ingin manual:
+### 4.3 Persiapan Manual (Tanpa `setup-ssh.sh`)
+
+Jika SSH key sudah siap atau ingin manual — tetap lakukan dari **satu mesin Administrator**:
 
 ```bash
-# 1. Generate SSH key (jika belum punya)
+# 1. Generate SSH key (jika belum punya) — DI MESIN ADMINISTRATOR
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
 
-# 2. Copy ke setiap server satu per satu
-ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.2
-ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.3
-ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.4
-ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.5
+# 2. Copy ke setiap server SATU PER SATU dari mesin Administrator
+ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.2   # Node 1 DB
+ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.3   # Node 2 DB
+ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.4   # Node 3 DB
+ssh-copy-id -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.5   # HAProxy LB
 
-# 3. Verifikasi passwordless
+# 3. Verifikasi passwordless — dari mesin Administrator
 ssh ubuntu@192.168.10.2 hostname
 ssh ubuntu@192.168.10.3 hostname
 ssh ubuntu@192.168.10.4 hostname
@@ -276,8 +384,10 @@ ssh ubuntu@192.168.10.5 hostname
 
 ### 5.1 Eksekusi
 
+**Script ini HANYA dijalankan di Mesin Administrator (SATU mesin).** Tidak perlu dijalankan di Node 1, Node 2, Node 3, atau HAProxy.
+
 ```bash
-cd /path/to/mariadb-galera-cluster-fix
+cd /path/to/mariadb-galera-cluster-fix    # Di Mesin Administrator
 chmod +x prepare-cluster.sh
 ./prepare-cluster.sh
 ```
@@ -957,23 +1067,35 @@ Sebelum memulai, pastikan server baru memenuhi semua persyaratan:
 
 ### 9.3 Langkah Detail
 
-#### Step 1: Verifikasi Koneksi SSH
+#### Penting: Di Mana Setiap Perintah Dijalankan
+
+| Step | Perintah | Dijalankan di | Target |
+|------|----------|---------------|--------|
+| Step 1 | Verifikasi SSH | **Mesin Administrator** | Ke node baru via SSH |
+| Step 2 | Edit inventory.yml | **Mesin Administrator** (file lokal) | - |
+| Step 3 | `ansible-playbook --limit ...` | **Mesin Administrator** | Ke node baru (otomatis via SSH) |
+| Step 4 | Pantau SST | **Mesin Administrator** | Ke node baru/donor via SSH |
+| Step 5 | Update HAProxy | **Mesin Administrator** | Ke HAProxy via Ansible/SSH |
+| Step 6 | Verifikasi | **Mesin Administrator** | Ke HAProxy via mysql client |
+
+#### Step 1: Verifikasi Koneksi SSH (dari Mesin Administrator)
 
 ```bash
 # Test koneksi ke node baru
+# Dijalankan di: MESIN ADMINISTRATOR → menuju IP node baru (192.168.10.5)
 ssh -o StrictHostKeyChecking=accept-new ubuntu@192.168.10.5 "hostname && uptime"
 
-# Test sudo
+# Test sudo (node baru harus punya sudo tanpa password)
 ssh ubuntu@192.168.10.5 "sudo -n true && echo 'Sudo OK' || echo 'Sudo FAIL'"
 
-# Pastikan hostname unik
+# Pastikan hostname unik — beda dengan node lain
 ssh ubuntu@192.168.10.5 "hostname"
-# Harus berbeda dengan: ssh ubuntu@192.168.10.2 "hostname"
-```
+# Harus berbeda dengan:
+ssh ubuntu@192.168.10.2 "hostname"
 
-#### Step 2: Update Inventory
+#### Step 2: Update Inventory (di Mesin Administrator)
 
-Edit file `inventory.yml` — tambahkan node baru di grup `mariadb_cluster`:
+Edit file `inventory.yml` yang ada di **mesin Administrator** — tambahkan node baru di grup `mariadb_cluster`:
 
 ```yaml
 [mariadb_cluster]
@@ -986,11 +1108,13 @@ mariadb_node_4 ansible_host=192.168.10.5 ansible_port=22 ansible_user=ubuntu int
 haproxy_load_balancer ansible_host=192.168.10.6 ansible_port=22 ansible_user=ubuntu interface_ip=192.168.10.6
 ```
 
-#### Step 3: Provision Node Baru
+#### Step 3: Provision Node Baru (dari Mesin Administrator)
 
 Jalankan Ansible playbook dengan **`--limit`** hanya ke node baru:
 
 ```bash
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: hanya node baru (mariadb_node_4 = 192.168.10.5)
 cd /path/to/mariadb-galera-cluster-fix
 
 ansible-playbook deploy-mariadb-cluster.yml \
@@ -1001,24 +1125,36 @@ ansible-playbook deploy-mariadb-cluster.yml \
   -e "mariadb_sst_password='ISI_PASSWORD_SST_ANDA'"
 ```
 
+**Yang terjadi di setiap server saat perintah di atas dijalankan:**
+
+| Server | Peran | Apa yang Terjadi |
+|--------|-------|------------------|
+| **Node Baru (192.168.10.5)** | Target utama | ✅ Install MariaDB, Galera, konfigurasi, start service, join cluster |
+| **Node 1 (192.168.10.2)** | Donor potensial | ✅ Hanya task setup user (mariabackup) — otomatis via `when: "'mariadb_cluster' in group_names"` |
+| **Node 2 (192.168.10.3)** | Donor potensial | ✅ Sama seperti Node 1 |
+| **Node 3 (192.168.10.4)** | Donor potensial | ✅ Sama seperti Node 1 |
+| **HAProxy (192.168.10.6)** | Tidak tersentuh | ❌ Tidak ada task karena `--limit` hanya node baru |
+
 **Penjelasan `--limit`:**
 
 | Task | Akan jalan? | Alasan |
 |------|-------------|--------|
-| Section 1-3 (install repo, paket, config) | ✅ Ya | Hanya di node baru (`--limit`) |
+| Section 1-3 (install repo, paket, config) | ✅ Ya | Task dijalankan di node baru (`--limit mariadb_node_4`) |
 | Section 4 (stop cluster) | ❌ Tidak | Tag `stop_cluster` tidak dipanggil |
-| Section 5 (start slave) | ✅ Ya | Kondisi `inventory_hostname != groups['mariadb_cluster'][0]` = True |
-| Section 5 (bootstrap primary) | ❌ Tidak | Kondisi `inventory_hostname == groups['mariadb_cluster'][0]` = False |
+| Section 5 (start slave) | ✅ Ya | Kondisi `inventory_hostname != groups['mariadb_cluster'][0]` = True untuk node baru |
+| Section 5 (bootstrap primary) | ❌ Tidak | Kondisi `inventory_hostname == groups['mariadb_cluster'][0]` = False untuk node baru |
 | Section 6 (install HAProxy) | ❌ Tidak | `--limit` hanya node baru, bukan LB |
-| Section 7 (setup user) | ✅ Ya | Di semua node grup `mariadb_cluster` |
+| Section 7 (setup user) | ✅ Ya | `when: "'mariadb_cluster' in group_names"` — jalan di SEMUA node cluster (termasuk node baru) |
 
-#### Step 4: Pantau Proses SST
+#### Step 4: Pantau Proses SST (dari Mesin Administrator)
 
-Saat node baru join, cluster akan mentransfer data. Proses ini bisa memakan waktu.
+Saat node baru join, cluster akan mentransfer data. Proses ini bisa memakan waktu tergantung ukuran database.
 
-**Pantau dari node baru:**
+**Pantau dari node baru (via SSH dari Mesin Administrator):**
 ```bash
-# Terminal 1: Pantau log MariaDB di node baru
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: SSH ke node baru (192.168.10.5) untuk melihat log MariaDB
+# Buka terminal terpisah untuk ini (sementara Step 3 berjalan)
 ssh ubuntu@192.168.10.5 "sudo journalctl -u mariadb -f"
 
 # Output yang diharapkan:
@@ -1030,7 +1166,8 @@ ssh ubuntu@192.168.10.5 "sudo journalctl -u mariadb -f"
 
 **Pantau dari donor (salah satu node yang sudah ada):**
 ```bash
-# Terminal 2: Pantau log di node donor
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: SSH ke Node donor (misal 192.168.10.2) untuk melihat log
 ssh ubuntu@192.168.10.2 "sudo tail -f /var/log/mysql/error.log | grep -i sst"
 
 # Output yang diharapkan:
@@ -1046,44 +1183,62 @@ ssh ubuntu@192.168.10.2 "sudo tail -f /var/log/mysql/error.log | grep -i sst"
 #   timeout: 300  →  timeout: 900  (15 menit)
 ```
 
-#### Step 5: Update HAProxy
+#### Step 5: Update HAProxy (dari Mesin Administrator)
 
-HAProxy otomatis membaca node dari `groups['mariadb_cluster']` di template. Cukup reload:
+HAProxy otomatis membaca node dari `groups['mariadb_cluster']` di template. Setelah inventory di-update di Step 2, kita perlu reload HAProxy.
 
 ```bash
-# Reload HAProxy (tidak putus koneksi yang sedang aktif)
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: HAProxy (192.168.10.6) — dikirim via Ansible
+# Reload HAProxy (tidak putus koneksi yang sedang aktif — recommended)
 ansible haproxy_load_balancer -i inventory.yml \
   -m shell -a "haproxy -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid -sf \$(cat /run/haproxy.pid)"
 ```
 
-Atau restart (akan putus koneksi aktif):
+Atau restart (akan putus koneksi aktif — lakukan di maintenance window):
 
 ```bash
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: HAProxy (192.168.10.6)
 ansible haproxy_load_balancer -i inventory.yml \
   -m systemd -a "name=haproxy state=restarted"
 ```
 
-#### Step 6: Verifikasi
+**Apa yang terjadi di setiap server:**
+
+| Server | Peran | Apa yang Terjadi |
+|--------|-------|------------------|
+| **Mesin Administrator** | Eksekutor | Menjalankan perintah Ansible |
+| **HAProxy (192.168.10.6)** | Target | ✅ Reload konfigurasi — node baru (192.168.10.5) sekarang masuk ke backend pool |
+| **Node 1,2,3** | Tidak tersentuh | ❌ Tidak ada perubahan |
+| **Node Baru** | Tidak tersentuh | ❌ Hanya reload HAProxy, node baru sudah join cluster di Step 3 |
+
+#### Step 6: Verifikasi (dari Mesin Administrator)
 
 ```bash
-# 1. Cek cluster size (harus 4)
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: konek ke HAProxy (192.168.10.6) via mysql client
+
+# 1. Cek cluster size (harus 4 — sebelumnya 3)
 mysql -h 192.168.10.6 -u root -p -N -e "SHOW STATUS LIKE 'wsrep_cluster_size'"
 # Output: 4
 
-# 2. Cek semua alamat node
+# 2. Cek semua alamat node yang terdaftar di cluster
 mysql -h 192.168.10.6 -u root -p -e "SHOW STATUS LIKE 'wsrep_incoming_addresses'"
 
-# 3. Cek status node baru (harus Synced)
+# 3. Cek status node baru (harus Synced — artinya data sudah sinkron)
 mysql -h 192.168.10.5 -u root -p -e "SHOW STATUS LIKE 'wsrep_local_state_comment'"
 # Output: Synced
 
-# 4. Cek via HAProxy Stats
+# 4. Cek via HAProxy Stats Dashboard (buka di browser MESIN ADMINISTRATOR)
 # Buka http://192.168.10.6:8404/
 # Login: admin / password dari group_vars_haproxy.yml
-# Harus ada 4 server MariaDB semua UP
+# Harus ada 4 server MariaDB semua status UP
 ```
 
 ### 9.4 Copy-Paste Command untuk Tambah Node
+
+> **Semua perintah di bawah dijalankan di MESIN ADMINISTRATOR**
 
 ```bash
 # ==========================================
@@ -1095,25 +1250,32 @@ NODE_IP="192.168.10.5"
 ROOT_PASS="ISI_PASSWORD_ROOT"
 SST_PASS="ISI_PASSWORD_SST"
 
-# 1. (Manual) Edit inventory.yml — tambahkan baris:
-#    ${NODE_LABEL} ansible_host=${NODE_IP} ansible_port=22 ansible_user=ubuntu interface_ip=${NODE_IP}
+# ========== STEP 1 (Manual): ==========
+# Edit file inventory.yml di MESIN ADMINISTRATOR
+# Tambahkan baris ini di grup [mariadb_cluster]:
+#   ${NODE_LABEL} ansible_host=${NODE_IP} ansible_port=22 ansible_user=ubuntu interface_ip=${NODE_IP}
 
-# 2. Provision node baru
+# ========== STEP 2: Provision node baru ==========
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: node baru (192.168.10.5) + semua node cluster (untuk setup user)
 ansible-playbook deploy-mariadb-cluster.yml \
   -i inventory.yml \
   --limit ${NODE_LABEL} \
   -e "@group_vars_haproxy.yml" \
   -e "mariadb_root_password='${ROOT_PASS}'" \
   -e "mariadb_sst_password='${SST_PASS}'"
-  ```
 
-  ```bash
-# 3. Reload HAProxy
+# ========== STEP 3: Reload HAProxy ==========
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: HAProxy (192.168.10.6)
 ansible haproxy_load_balancer -i inventory.yml \
   -m shell -a "haproxy -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid -sf \$(cat /run/haproxy.pid)"
 
-# 4. Verifikasi
+# ========== STEP 4: Verifikasi ==========
+# Dijalankan di: MESIN ADMINISTRATOR
+# Target: konek ke HAProxy (192.168.10.6) via mysql client
 mysql -h haproxy_load_balancer -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size'"
+# Harus: 4 (bertambah 1 dari sebelumnya)
 ```
 
 ---
@@ -1122,41 +1284,75 @@ mysql -h haproxy_load_balancer -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_si
 
 ### 10.1 Hapus Node dari Cluster (Tanpa Downtime)
 
+> **Perhatikan di mana setiap perintah dijalankan:**
+
 ```bash
-# 1. SSH ke node yang akan dihapus
+# ========== STEP 1: Nonaktifkan node via SSH ==========
+# Dijalankan di: MESIN ADMINISTRATOR → SSH ke node yang akan dihapus
 ssh ubuntu@192.168.10.5
 
-# 2. Set weight ke 0 (tidak terima koneksi baru)
+# Setelah SSH masuk ke node yang akan dihapus:
+# Set weight ke 0 (tidak terima koneksi baru)
 mysql -u root -p -e "SET GLOBAL wsrep_provider_options='pc.weight=0';"
 
-# 3. Hentikan MariaDB service
+# Hentikan MariaDB service
 sudo systemctl stop mariadb
 
-# 4. Keluar dari SSH
+# Keluar dari SSH (kembali ke MESIN ADMINISTRATOR)
 exit
 
-# 5. Hapus node dari inventory.yml
-# Hapus baris: mariadb_node_4 ...
+# ========== STEP 2: Hapus dari inventory (di Mesin Administrator) ==========
+# Edit file inventory.yml di MESIN ADMINISTRATOR
+# Hapus baris: mariadb_node_4 ansible_host=192.168.10.5 ...
 
-# 6. Reload HAProxy (update backend list)
+# ========== STEP 3: Reload HAProxy ==========
+# Dijalankan di: MESIN ADMINISTRATOR → Target: HAProxy
 ansible haproxy_load_balancer -i inventory.yml \
   -m shell -a "haproxy -f /etc/haproxy/haproxy.cfg -p /run/haproxy.pid -sf \$(cat /run/haproxy.pid)"
 
-# 7. Verifikasi cluster size berkurang
+# ========== STEP 4: Verifikasi ==========
+# Dijalankan di: MESIN ADMINISTRATOR → Target: HAProxy via mysql
 mysql -h <IP_LB> -u root -p -N -e "SHOW STATUS LIKE 'wsrep_cluster_size'"
-# Harus: 3
+# Harus: 3 (berkurang 1)
 ```
+
+**Yang terjadi di setiap server:**
+
+| Server | Apa yang Terjadi |
+|--------|------------------|
+| **Mesin Administrator** | Menjalankan SSH ke node yang dihapus, edit inventory, reload HAProxy |
+| **Node yang dihapus (192.168.10.5)** | ✅ Weight=0 (stop terima koneksi) → MariaDB distop → keluar dari cluster |
+| **Node 1,2,3** | ✅ Otomatis mendeteksi node yang pergi, cluster size berkurang |
+| **HAProxy (192.168.10.6)** | ✅ Reload — hapus node yang dihapus dari backend pool |
+| **Aplikasi** | ✅ Tidak terpengaruh — koneksi didistribusikan ke 3 node sisanya |
 
 ### 10.2 Hapus Node Permanen (Bersihkan Data)
 
+> **Setelah langkah 10.1 selesai, jalankan ini dari Mesin Administrator:**
+
 ```bash
-# Setelah langkah 1-6 di atas, jalankan:
+# SSH ke node yang sudah dihapus dari cluster
+# Dijalankan di: MESIN ADMINISTRATOR → SSH ke node yang sudah tidak aktif
 ssh ubuntu@192.168.10.5 "
+
+  # Hentikan MariaDB (pastikan sudah stop)
   sudo systemctl stop mariadb
+
+  # Hapus semua data database
   sudo rm -rf /var/lib/mysql/*
+
+  # Hapus konfigurasi Galera
   sudo rm -f /etc/mysql/conf.d/mariadb_galera_cluster.cnf
-  sudo apt-get remove -y mariadb-server galera-4 mariadb-backup
+
+  # Uninstall MariaDB + Galera packages
+  sudo apt-get remove -y mariadb-server galera-4 mariadb-backup mariadb-client
+
+  # Bersihkan package yang tidak terpakai
   sudo apt-get autoremove -y
+
+  # Hapus repository MariaDB
+  sudo rm -f /etc/apt/sources.list.d/mariadb.list
+  sudo rm -f /usr/share/keyrings/mariadb-keyring.*
 "
 ```
 
