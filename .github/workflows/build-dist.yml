@@ -1,0 +1,152 @@
+name: Build galera-cluster-dist
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'mariadb-galera-cluster-fix/**'
+      - '.github/workflows/build-dist.yml'
+  pull_request:
+    paths:
+      - 'mariadb-galera-cluster-fix/**'
+      - '.github/workflows/build-dist.yml'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build-tui:
+    name: TUI ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+            bin: galera-tui
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux-aarch64
+            bin: galera-tui
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: darwin-aarch64
+            bin: galera-tui
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: darwin-x86_64
+            bin: galera-tui
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            bin: galera-tui.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mariadb-galera-cluster-fix/tui
+
+      - name: Build release
+        working-directory: mariadb-galera-cluster-fix/tui
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage binary (Unix)
+        if: runner.os != 'Windows'
+        working-directory: mariadb-galera-cluster-fix
+        run: |
+          mkdir -p "artifacts/${{ matrix.platform }}"
+          cp "tui/target/${{ matrix.target }}/release/${{ matrix.bin }}" "artifacts/${{ matrix.platform }}/"
+          chmod +x "artifacts/${{ matrix.platform }}/${{ matrix.bin }}"
+
+      - name: Stage binary (Windows)
+        if: runner.os == 'Windows'
+        working-directory: mariadb-galera-cluster-fix
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "artifacts/${{ matrix.platform }}" | Out-Null
+          Copy-Item "tui/target/${{ matrix.target }}/release/${{ matrix.bin }}" "artifacts/${{ matrix.platform }}/"
+
+      - name: Upload platform binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: galera-tui-${{ matrix.platform }}
+          path: mariadb-galera-cluster-fix/artifacts/${{ matrix.platform }}
+          retention-days: 14
+
+  assemble-dist:
+    name: Assemble distribution package
+    needs: build-tui
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all TUI binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: bin-artifacts
+          pattern: galera-tui-*
+
+      - name: Layout bin tree
+        run: |
+          set -euo pipefail
+          mkdir -p staging/bin
+          for artifact in bin-artifacts/galera-tui-*; do
+            platform="$(basename "$artifact" | sed 's/^galera-tui-//')"
+            mkdir -p "staging/bin/${platform}"
+            cp -a "${artifact}/." "staging/bin/${platform}/"
+          done
+          echo "Platforms assembled:"
+          find staging/bin -type f | sort
+
+      - name: Assemble galera-cluster-dist
+        env:
+          SRC: ${{ github.workspace }}/mariadb-galera-cluster-fix
+          DIST: ${{ github.workspace }}/galera-cluster-dist
+          BIN_ROOT: ${{ github.workspace }}/staging/bin
+        run: bash mariadb-galera-cluster-fix/tools/assemble-dist.sh
+
+      - name: Create zip archive
+        run: |
+          cd galera-cluster-dist
+          zip -r ../galera-cluster-dist.zip .
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: galera-cluster-dist
+          path: galera-cluster-dist.zip
+          retention-days: 30
+
+  publish-release:
+    name: Attach to GitHub Release
+    if: github.event_name == 'release'
+    needs: assemble-dist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distribution zip
+        uses: actions/download-artifact@v4
+        with:
+          name: galera-cluster-dist
+          path: release-assets
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/galera-cluster-dist.zip
