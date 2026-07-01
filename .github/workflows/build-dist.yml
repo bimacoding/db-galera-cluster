@@ -11,8 +11,6 @@ on:
       - 'mariadb-galera-cluster-fix/**'
       - '.github/workflows/build-dist.yml'
   workflow_dispatch:
-  release:
-    types: [published]
 
 permissions:
   contents: read
@@ -131,22 +129,3 @@ jobs:
           name: galera-cluster-dist
           path: galera-cluster-dist.zip
           retention-days: 30
-
-  publish-release:
-    name: Attach to GitHub Release
-    if: github.event_name == 'release'
-    needs: assemble-dist
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download distribution zip
-        uses: actions/download-artifact@v4
-        with:
-          name: galera-cluster-dist
-          path: release-assets
-
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/galera-cluster-dist.zip
