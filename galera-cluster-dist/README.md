@@ -86,4 +86,4 @@ Semua ada di folder **`docs/`**:
 
 Jangan distribusikan `group_vars/all/secrets.yml` atau password asli.
 
-Binary yang tersedia saat pack: **darwin-aarch64**
+Binary yang tersedia: **darwin-aarch64**
