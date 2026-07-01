@@ -1,7 +1,0 @@
----
-# Variabel tuning MariaDB Galera (boleh di-commit, bukan secret)
-mariadb_cluster_name: prod_mariadb_cluster
-mariadb_max_allowed_packet: "512M"
-mariadb_key_buffer_size: "256M"
-mariadb_innodb_buffer_pool_size: "1G"
-mariadb_max_connections: "500"

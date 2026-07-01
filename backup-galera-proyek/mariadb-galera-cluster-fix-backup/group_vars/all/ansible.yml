@@ -1,6 +1,0 @@
----
-# Konfigurasi Ansible global untuk semua host
-ansible_become_method: sudo
-ansible_become_flags: "-H -S"
-ansible_python_interpreter: /usr/bin/python3
-ansible_ssh_common_args: "-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
