@@ -1,0 +1,4 @@
+group_vars/all/secrets.yml
+group_vars_haproxy.yml
+.pass
+.credentials-*.txt

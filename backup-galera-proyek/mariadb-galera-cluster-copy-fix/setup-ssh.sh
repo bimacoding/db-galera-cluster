@@ -4,7 +4,7 @@
 # Setup SSH key (generate + copy ke banyak server sekaligus)
 # untuk persiapan deploy MariaDB Galera Cluster.
 # ==============================================================
-# Jalankan ini DULUAN, sebelum configure-inventory.sh, supaya semua
+# Jalankan ini DULUAN, sebelum prepare-cluster.sh, supaya semua
 # server tujuan sudah bisa diakses passwordless lewat SSH key.
 # ==============================================================
 # Cara pakai:
@@ -313,7 +313,7 @@ test_all_connections() {
 
     echo ""
     if [ "${all_ok}" = true ]; then
-        log_success "Semua server bisa diakses passwordless. Siap lanjut ke configure-inventory.sh"
+        log_success "Semua server bisa diakses passwordless. Siap lanjut ke prepare-cluster.sh"
     else
         log_warn "Sebagian server masih gagal. Cek koneksi/firewall/password sebelum lanjut deploy."
     fi
@@ -355,7 +355,7 @@ main() {
     echo -e "${CYAN}|            Setup SSH Key untuk Galera Cluster            |${NC}"
     echo -e "${CYAN}+----------------------------------------------------------+${NC}"
     echo ""
-    echo "Jalankan ini sebelum configure-inventory.sh agar SSH ke semua"
+    echo "Jalankan ini sebelum prepare-cluster.sh agar SSH ke semua"
     echo "node database + load balancer sudah siap passwordless."
     echo ""
 
@@ -384,7 +384,7 @@ main() {
 
     echo ""
     echo -e "${GREEN}Setup SSH selesai. Selanjutnya jalankan:${NC}"
-    echo "  ./configure-inventory.sh"
+    echo "  ./prepare-cluster.sh"
     echo ""
 }
 

@@ -16,7 +16,7 @@
 #  8. mysql_user login memakai unix_socket utk root (lebih aman/andal
 #     daripada password kosong yang gagal di run kedua)
 #  9. Password root TIDAK lagi hardcoded plaintext default; harus
-#     diisi lewat vars/vault atau configure-inventory.sh / group_vars
+#     diisi lewat vars/vault atau prepare-cluster.sh
 # ==============================================================
 ---
 - hosts: all
@@ -27,8 +27,8 @@
     mariadb_cluster_name: prod_mariadb_cluster
     # WAJIB diisi. Jangan commit password asli ke git -- gunakan
     # ansible-vault atau export ANSIBLE_VAULT_PASSWORD_FILE.
-    mariadb_root_password: "tz8WVARs2Nyq5A87vk54tAF3"
-    mariadb_sst_password: "tz8WVARs2Nyq5A87vk54tAF3"
+    mariadb_root_password: "CHANGE_ME_BEFORE_DEPLOY"
+    mariadb_sst_password: "CHANGE_ME_SST_PASSWORD"
     mariadb_version: "10.11"
     mariadb_mirror: "https://mirror.mariadb.org/repo"
     # Override per-host di inventory jika server multi-NIC dan
@@ -155,23 +155,10 @@
     # memakai PyMySQL, bukan MySQLdb -- python3-pymysql cukup.
 
   - name: Stop MariaDB service sebelum konfigurasi
-    shell: |
-      set -o pipefail
-      if ! systemctl is-active --quiet mariadb 2>/dev/null; then
-        systemctl reset-failed mariadb 2>/dev/null || true
-        exit 0
-      fi
-      timeout 30 systemctl stop mariadb 2>/dev/null || true
-      if systemctl is-active --quiet mariadb 2>/dev/null; then
-        systemctl kill -s SIGKILL mariadb 2>/dev/null || true
-        pkill -9 mariadbd 2>/dev/null || true
-        pkill -9 -f wsrep_sst 2>/dev/null || true
-        systemctl reset-failed mariadb 2>/dev/null || true
-      fi
-    args:
-      executable: /bin/bash
+    systemd:
+      name: mariadb
+      state: stopped
     when: "'mariadb_cluster' in group_names"
-    changed_when: true
     failed_when: false
 
   - name: Pastikan direktori data MariaDB ada dengan permission benar
@@ -217,13 +204,6 @@
       mode: "0640"
     when: "'mariadb_cluster' in group_names"
 
-  - name: Override bind-address default 127.0.0.1 (HAProxy & Galera butuh 0.0.0.0)
-    lineinfile:
-      path: /etc/mysql/mariadb.conf.d/50-server.cnf
-      regexp: '^bind-address'
-      line: 'bind-address            = 0.0.0.0'
-    when: "'mariadb_cluster' in group_names"
-
   - name: Hapus konfigurasi MySQL default yang konflik jika ada
     file:
       path: /etc/mysql/conf.d/mysql.cnf
@@ -250,19 +230,12 @@
       - start_cluster
 
   - name: Stop node MariaDB slave (bukan primary)
-    shell: |
-      set -o pipefail
-      timeout 30 systemctl stop mariadb 2>/dev/null || true
-      systemctl kill -s SIGKILL mariadb 2>/dev/null || true
-      pkill -9 mariadbd 2>/dev/null || true
-      pkill -9 -f wsrep_sst 2>/dev/null || true
-      systemctl reset-failed mariadb 2>/dev/null || true
-    args:
-      executable: /bin/bash
+    systemd:
+      name: mariadb
+      state: stopped
     when: "('load_balancer' not in group_names) and (inventory_hostname != groups['mariadb_cluster'][0])"
     tags:
       - stop_cluster
-    changed_when: true
     failed_when: false
 
   - name: Tunggu 15 detik agar slave node shutdown bersih
@@ -272,19 +245,12 @@
       - stop_cluster
 
   - name: Stop node MariaDB primary
-    shell: |
-      set -o pipefail
-      timeout 30 systemctl stop mariadb 2>/dev/null || true
-      systemctl kill -s SIGKILL mariadb 2>/dev/null || true
-      pkill -9 mariadbd 2>/dev/null || true
-      pkill -9 -f wsrep_sst 2>/dev/null || true
-      systemctl reset-failed mariadb 2>/dev/null || true
-    args:
-      executable: /bin/bash
+    systemd:
+      name: mariadb
+      state: stopped
     when: inventory_hostname == groups['mariadb_cluster'][0]
     tags:
       - stop_cluster
-    changed_when: true
     failed_when: false
 
   - name: Tunggu 10 detik untuk shutdown selesai total
@@ -296,29 +262,6 @@
 # ============================================================
 # 5. URUTAN START / BOOTSTRAP CLUSTER
 # ============================================================
-
-  - name: Set safe_to_bootstrap pada node primary sebelum bootstrap
-    shell: |
-      set -o pipefail
-      GRASTATE="/var/lib/mysql/grastate.dat"
-      if [ -f "${GRASTATE}" ]; then
-        sed -i 's/^safe_to_bootstrap:.*/safe_to_bootstrap: 1/' "${GRASTATE}"
-      else
-        cat > "${GRASTATE}" <<'EOF'
-      # GALERA saved state
-      version: 2.1
-      uuid:    00000000-0000-0000-0000-000000000000
-      seqno:   -1
-      safe_to_bootstrap: 1
-      EOF
-      fi
-      chown mysql:mysql "${GRASTATE}"
-      chmod 660 "${GRASTATE}"
-    args:
-      executable: /bin/bash
-    when: inventory_hostname == groups['mariadb_cluster'][0]
-    tags:
-      - start_cluster
 
   - name: Bootstrap node primary MariaDB dengan Galera
     shell: galera_new_cluster
@@ -338,92 +281,20 @@
       - start_cluster
 
   - name: Tunggu port 3306 primary benar-benar listening (bukan pause statis)
-    shell: |
-      for i in $(seq 1 120); do
-        if ss -tln | grep -qE '0\.0\.0\.0:3306|\*:3306|{{ interface_ip }}:3306'; then
-          exit 0
-        fi
-        sleep 1
-      done
-      ss -tln
-      exit 1
-    args:
-      executable: /bin/bash
-    when: inventory_hostname == groups['mariadb_cluster'][0]
-    tags:
-      - start_cluster
-
-  - name: Tunggu port 3306 primary via wait_for (fallback)
     wait_for:
       host: "{{ interface_ip }}"
       port: 3306
-      delay: 0
-      timeout: 30
+      delay: 2
+      timeout: 90
       state: started
     when: inventory_hostname == groups['mariadb_cluster'][0]
     tags:
       - start_cluster
-    failed_when: false
 
   - name: Enable unit systemd mariadb di node primary
     systemd:
       name: mariadb
       enabled: yes
-    when: inventory_hostname == groups['mariadb_cluster'][0]
-    tags:
-      - start_cluster
-
-  - name: Set password root MariaDB sebelum slave join (via unix_socket)
-    mysql_user:
-      name: root
-      host: "{{ item }}"
-      check_implicit_admin: yes
-      login_unix_socket: /run/mysqld/mysqld.sock
-      password: "{{ mariadb_root_password }}"
-      priv: "*.*:ALL,GRANT"
-      state: present
-      update_password: always
-    loop:
-      - 127.0.0.1
-      - "localhost"
-      - "%"
-    when: inventory_hostname == groups['mariadb_cluster'][0]
-    register: root_pw_socket_result
-    ignore_errors: yes
-    tags:
-      - start_cluster
-
-  - name: Set password root MariaDB sebelum slave join (fallback password auth)
-    mysql_user:
-      name: root
-      host: "{{ item }}"
-      login_user: root
-      login_password: "{{ mariadb_root_password }}"
-      login_host: 127.0.0.1
-      password: "{{ mariadb_root_password }}"
-      priv: "*.*:ALL,GRANT"
-      state: present
-      update_password: always
-    loop:
-      - 127.0.0.1
-      - "localhost"
-      - "%"
-    when:
-      - inventory_hostname == groups['mariadb_cluster'][0]
-      - root_pw_socket_result is failed
-    tags:
-      - start_cluster
-
-  - name: Buat user mariabackup di primary sebelum SST (donor wajib punya user ini)
-    mysql_user:
-      name: mariabackup
-      host: localhost
-      password: "{{ mariadb_sst_password }}"
-      priv: "*.*:RELOAD,PROCESS,LOCK TABLES,REPLICATION CLIENT"
-      state: present
-      update_password: always
-      check_implicit_admin: yes
-      login_unix_socket: /run/mysqld/mysqld.sock
     when: inventory_hostname == groups['mariadb_cluster'][0]
     tags:
       - start_cluster
@@ -445,20 +316,16 @@
     # makan waktu lebih dari beberapa puluh detik.
 
   - name: Tunggu setiap slave node port 3306 listening setelah SST/IST
-    shell: |
-      for i in $(seq 1 300); do
-        if ss -tln | grep -qE '0\.0\.0\.0:3306|\*:3306|{{ interface_ip }}:3306'; then
-          exit 0
-        fi
-        sleep 1
-      done
-      ss -tln
-      exit 1
-    args:
-      executable: /bin/bash
+    wait_for:
+      host: "{{ interface_ip }}"
+      port: 3306
+      delay: 2
+      timeout: 300
+      state: started
     when: "('load_balancer' not in group_names) and (inventory_hostname != groups['mariadb_cluster'][0])"
     tags:
       - start_cluster
+    # timeout 300s karena SST mariabackup pada dataset besar bisa lama.
 
 # ============================================================
 # 6. SETUP HAPROXY LOAD BALANCER
@@ -537,7 +404,7 @@
       login_host: 127.0.0.1
     when: inventory_hostname == groups['mariadb_cluster'][0]
 
-  - name: Buat/perbarui user SST mariabackup (replikasi Galera ke semua node)
+  - name: Buat/perbarui user SST mariabackup (dipakai wsrep_sst_auth di config)
     mysql_user:
       name: mariabackup
       host: localhost
@@ -548,8 +415,11 @@
       login_user: root
       login_password: "{{ mariadb_root_password }}"
       login_host: 127.0.0.1
-    when: inventory_hostname == groups['mariadb_cluster'][0]
-    # User dibuat di primary sebelum SST; task ini idempotent untuk re-run playbook.
+    when: "'mariadb_cluster' in group_names"
+    # PENTING: user ini WAJIB ada di SEMUA node cluster (bukan hanya
+    # primary) karena SST/IST bisa di-request dari node manapun yang
+    # berperan sebagai donor. Tanpa ini, join node baru akan gagal
+    # autentikasi mariabackup walau wsrep_sst_auth sudah di config.
 
   - name: Buat user health-check HAProxy di semua node cluster
     mysql_user:

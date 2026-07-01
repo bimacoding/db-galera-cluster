@@ -1,0 +1,27 @@
+# inventory.yml — edit IP via ./configure-inventory.sh atau manual
+all:
+  children:
+    mariadb_cluster:
+      hosts:
+        mariadb_node_1:
+          ansible_host: 10.0.0.50
+          ansible_port: 22
+          ansible_user: ubuntu
+          interface_ip: 10.0.0.50
+        mariadb_node_2:
+          ansible_host: 10.0.0.51
+          ansible_port: 22
+          ansible_user: ubuntu
+          interface_ip: 10.0.0.51
+        mariadb_node_3:
+          ansible_host: 10.0.0.52
+          ansible_port: 22
+          ansible_user: ubuntu
+          interface_ip: 10.0.0.52
+    load_balancer:
+      hosts:
+        haproxy_load_balancer:
+          ansible_host: 10.0.0.53
+          ansible_port: 22
+          ansible_user: ubuntu
+          interface_ip: 10.0.0.53

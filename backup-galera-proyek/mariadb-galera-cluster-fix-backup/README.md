@@ -63,9 +63,7 @@ mariadb-galera-cluster-fix/
 ├── OPERASI.md                   # Panduan operasi lengkap
 ├── ARSITEKTUR.md                # Diagram & migrasi
 ├── CHANGELOG.md                 # Daftar bug fix dari versi asli
-├── tui/                         # Galera TUI (Rust, cross-platform)
-│   └── target/release/galera-tui  # binary setelah cargo build --release
-└── trash/                       # Arsip file lama
+└── trash/                       # Arsip file lama (STEP.md, prepare-cluster.sh)
 ```
 
 ## Koneksi Database
@@ -73,29 +71,6 @@ mariadb-galera-cluster-fix/
 ```bash
 mysql -h <IP_HAPROXY> -u root -p
 # Stats: http://<IP_HAPROXY>:8404/
-```
-
-## Galera TUI (Rust — Windows / Linux / macOS)
-
-Antarmuka terminal interaktif untuk kontrol cluster tanpa ingat perintah Ansible:
-
-```bash
-cd tui
-cargo build --release
-../tui/target/release/galera-tui   # dari folder mariadb-galera-cluster-fix
-```
-
-Fitur: dashboard status, start/stop, deploy, reset, apply config, edit inventory & tuning, tambah node.
-
-Detail: [`tui/README.md`](tui/README.md)
-
-## Paket Distribusi (`galera-cluster-dist/`)
-
-Folder terpisah siap kirim ke tim (Ansible + binary TUI):
-
-```bash
-./tools/pack-dist.sh   # generate ../galera-cluster-dist/
-cd ../galera-cluster-dist && ./start.sh
 ```
 
 ## Dokumentasi Lain

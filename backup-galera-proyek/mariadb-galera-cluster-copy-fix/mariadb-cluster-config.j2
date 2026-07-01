@@ -26,7 +26,8 @@ wsrep_node_name="{{ inventory_hostname }}"
 # MariaDB Galera mode strict
 wsrep_provider_options="base_port=4567; gmcast.segment=0; pc.announce_timeout=PT15S; evs.keepalive_period=PT3S; evs.suspect_timeout=PT1M30S; evs.inactive_timeout=PT3M; evs.install_timeout=PT1M; evs.send_window=4; evs.user_send_window=2"
 
-# Catatan: pastikan firewall membuka port berikut antar-node cluster:
+# Catatan: pastikan firewall membuka port berikut antar-node cluster
+# (lihat prepare-cluster.sh, opsi firewall WAJIB "a" untuk node DB):
 #   3306/tcp  - koneksi client/HAProxy
 #   4567/tcp+udp - replikasi Galera (gcomm)
 #   4568/tcp  - IST (Incremental State Transfer)
@@ -42,8 +43,6 @@ innodb_file_per_table=1
 innodb_autoinc_lock_mode=2
 
 # Connection & Thread Pool
-max_allowed_packet={{ mariadb_max_allowed_packet | default('512M') }}
-key_buffer_size={{ mariadb_key_buffer_size | default('256M') }}
 max_connections={{ mariadb_max_connections | default('500') }}
 thread_cache_size=128
 

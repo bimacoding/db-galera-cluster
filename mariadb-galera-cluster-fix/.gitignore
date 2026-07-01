@@ -1,0 +1,9 @@
+# Kredensial — jangan commit
+.pass
+group_vars/all/secrets.yml
+group_vars_haproxy.yml
+.credentials-*.txt
+*.bak.*
+
+# Rust TUI build artifacts
+tui/target/

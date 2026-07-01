@@ -1,0 +1,13 @@
+---
+# Install dengan:
+#   ansible-galaxy collection install -r requirements.yml
+#
+# community.mysql menyediakan modul mysql_user / mysql_db yang dipakai
+# oleh deploy-mariadb-cluster.yml. Modul ini TIDAK termasuk di
+# ansible-core, jadi WAJIB di-install terpisah atau playbook akan
+# gagal dengan error "couldn't resolve module/action".
+collections:
+  - name: community.mysql
+    version: ">=3.6.0"
+  - name: community.general
+    version: ">=8.0.0"
